@@ -27,6 +27,7 @@ class WebSocketHandler:
         websocket: websockets.WebSocketServerProtocol,
         task_executor: TaskExecutor,
         heartbeat_interval: int = 30,
+        task_timeout: int = 300,
     ):
         """
         Initialize WebSocket handler.
@@ -35,10 +36,12 @@ class WebSocketHandler:
             websocket: WebSocket connection
             task_executor: TaskExecutor instance
             heartbeat_interval: Heartbeat interval in seconds
+            task_timeout: Task timeout in seconds
         """
         self.websocket = websocket
         self.task_executor = task_executor
         self.heartbeat_interval = heartbeat_interval
+        self.task_timeout = task_timeout
         self.current_task_id: Optional[str] = None
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.running = False
@@ -122,7 +125,11 @@ class WebSocketHandler:
 
         try:
             # Execute task
-            result = await self.task_executor.execute_task(task, device_id)
+            execute_coro = self.task_executor.execute_task(task, device_id)
+            if self.task_timeout > 0:
+                result = await asyncio.wait_for(execute_coro, timeout=self.task_timeout)
+            else:
+                result = await execute_coro
 
             # Send completion or error
             if result.get("success"):
@@ -134,6 +141,15 @@ class WebSocketHandler:
                     "execution_error"
                 )
 
+        except asyncio.TimeoutError:
+            logger.error(f"Task {task_id} timed out after {self.task_timeout}s")
+            # Invalidate task immediately to block stale progress callbacks.
+            self.current_task_id = None
+            await self._send_error(
+                task_id,
+                f"Task timed out after {self.task_timeout} seconds",
+                "execution_error"
+            )
         except Exception as e:
             logger.error(f"Task execution failed: {e}", exc_info=True)
             await self._send_error(task_id, str(e), "execution_error")
@@ -160,6 +176,11 @@ class WebSocketHandler:
             task_id: Task identifier
             progress_data: Progress data from PhoneAgent
         """
+        # Ignore stale updates from timed out/replaced tasks.
+        if task_id != self.current_task_id:
+            logger.debug(f"Skipping stale progress update for task {task_id}")
+            return
+
         # Extract fields once
         step = progress_data.get("step", 0)
         action = progress_data.get("action")

@@ -91,7 +91,7 @@ class TaskExecutor:
             agent_config: Agent configuration dictionary
         """
         self.model_config = ModelConfig(**model_config)
-        self.agent_config = AgentConfig(**agent_config)
+        self.base_agent_config = AgentConfig(**agent_config)
         # Use cached device type enum from config
         self.device_type_enum = server_config.get_device_type_enum()
         self.agent = None
@@ -174,14 +174,13 @@ class TaskExecutor:
             # Set device type (use cached enum)
             set_device_type(self.device_type_enum)
 
-            # Update agent config with device_id if provided
-            if device_id:
-                self.agent_config.device_id = device_id
+            # Build per-task agent config to avoid cross-request state leakage
+            task_agent_config = self._build_task_agent_config(device_id)
 
             # Create WebSocketPhoneAgent instance
             self.agent = WebSocketPhoneAgent(
                 model_config=self.model_config,
-                agent_config=self.agent_config,
+                agent_config=task_agent_config,
                 progress_callback=self._sync_progress_callback,
             )
 
@@ -201,6 +200,30 @@ class TaskExecutor:
                 'error': str(e),
                 'total_steps': self.agent.step_count if self.agent else 0,
             }
+
+    def _build_task_agent_config(self, device_id: Optional[str]) -> AgentConfig:
+        """
+        Build an isolated AgentConfig for a single task execution.
+
+        Args:
+            device_id: Optional per-request device ID override
+
+        Returns:
+            AgentConfig instance for the current task
+        """
+        resolved_device_id = (
+            device_id
+            if device_id is not None
+            else self.base_agent_config.device_id
+        )
+
+        return AgentConfig(
+            max_steps=self.base_agent_config.max_steps,
+            device_id=resolved_device_id,
+            lang=self.base_agent_config.lang,
+            system_prompt=self.base_agent_config.system_prompt,
+            verbose=self.base_agent_config.verbose,
+        )
 
     def cleanup(self):
         """Clean up resources."""

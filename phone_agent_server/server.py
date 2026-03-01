@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Global state
 active_connections = set()
 server = None
+is_shutting_down = False
 
 
 async def handle_client(websocket):
@@ -50,6 +51,7 @@ async def handle_client(websocket):
             websocket=websocket,
             task_executor=task_executor,
             heartbeat_interval=server_config["heartbeat_interval"],
+            task_timeout=server_config["task_timeout"],
         )
 
         # Handle connection
@@ -86,13 +88,22 @@ async def start_server(host: str, port: int):
     return server
 
 
-async def shutdown(sig=None):
+async def shutdown(sig=None, stop_loop: bool = False):
     """
     Graceful shutdown handler.
 
     Args:
         sig: Signal that triggered shutdown
+        stop_loop: Whether to stop event loop after cleanup
     """
+    global is_shutting_down
+
+    if is_shutting_down:
+        if stop_loop:
+            asyncio.get_running_loop().stop()
+        return
+    is_shutting_down = True
+
     if sig:
         logger.info(f"Received exit signal {sig.name}")
 
@@ -112,6 +123,9 @@ async def shutdown(sig=None):
         await server.wait_closed()
 
     logger.info("Server shutdown complete")
+
+    if stop_loop:
+        asyncio.get_running_loop().stop()
 
 
 def main():
@@ -135,7 +149,7 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(
             sig,
-            lambda s=sig: asyncio.create_task(shutdown(s))
+            lambda s=sig: asyncio.create_task(shutdown(s, stop_loop=True))
         )
 
     try:
